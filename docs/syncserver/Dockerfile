@@ -4,8 +4,10 @@ ARG ANKI_VERSION
 
 RUN apk update && apk add --no-cache build-base protobuf && rm -rf /var/cache/apk/*
 
-RUN cargo install --git https://github.com/ankitects/anki.git \
---tag ${ANKI_VERSION} \
+ADD ../.. /anki-src
+
+# RUN cargo install --git https://github.com/ankitects/anki.git \
+RUN cargo install --git file:///anki-src \
 --root /anki-server  \
 anki-sync-server
 
@@ -31,4 +33,4 @@ CMD ["anki-sync-server"]
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:${SYNC_PORT}/health || exit 1
 
-LABEL maintainer="Jean Khawand <jk@jeankhawand.com>"
+# LABEL maintainer="Jean Khawand <jk@jeankhawand.com>"

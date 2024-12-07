@@ -1,0 +1,11 @@
+services:
+  anki-sync-server:
+    image: anki-sync-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - type: bind
+        source: ../../../syncbase
+        target: /syncbase
+    env_file:
+      - anki-sync-server.env

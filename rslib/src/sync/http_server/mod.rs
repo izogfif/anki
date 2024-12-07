@@ -23,6 +23,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use axum::Router;
 use axum_client_ip::SecureClientIpSource;
+use fluent_bundle::types::AnyEq;
 use pbkdf2::password_hash::PasswordHash;
 use pbkdf2::password_hash::PasswordHasher;
 use pbkdf2::password_hash::PasswordVerifier;
@@ -58,6 +59,8 @@ pub struct SimpleServer {
 pub struct SimpleServerInner {
     /// hkey->user
     users: HashMap<String, User>,
+    admin_key: String,
+    base_folder: PathBuf,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -90,59 +93,86 @@ pub fn default_ip_header() -> SecureClientIpSource {
     SecureClientIpSource::ConnectInfo
 }
 
+fn create_user(base_folder: &PathBuf, name: &String, password: &String) -> (String, User) {
+    let val: String = [name.to_string(), password.to_string()].join(":");
+    let hkey = derive_hkey(&val);
+    let (name, pwhash) = {
+        if std::env::var("PASSWORDS_HASHED").is_ok() {
+            (name.to_string(), password.to_string())
+        } else {
+            (
+                name.to_string(),
+                // Plain text passwords provided; hash them with a fixed salt.
+                Pbkdf2
+                    .hash_password(
+                        password.as_bytes(),
+                        &SaltString::from_b64("tonuvYGpksNFQBlEmm3lxg").unwrap(),
+                    )
+                    .expect("couldn't hash password")
+                    .to_string(),
+            )
+        }
+    };
+    let folder = base_folder.join(&name);
+    create_dir_all(&folder)
+        // .whatever_context("creating SYNC_BASE")
+        .expect("couldn't create SYNC_BASE");
+    let media = ServerMediaManager::new(&folder)
+        // .whatever_context("opening media")
+        .expect("opening media failed");
+    (
+        hkey,
+        User {
+            name: name.into(),
+            password_hash: pwhash,
+            col: None,
+            sync_state: None,
+            media,
+            folder,
+        },
+    )
+}
 impl SimpleServerInner {
     fn new_from_env(base_folder: &Path) -> error::Result<Self, Whatever> {
         let mut idx = 1;
         let mut users: HashMap<String, User> = Default::default();
+        let mut admin_key: String = String::new();
+        match std::env::var("ADMIN_KEY") {
+            Ok(val) => {
+                admin_key = val;
+            }
+            Err(_) => {}
+        }
+        if admin_key.is_empty() {
+            whatever!("ADMIN_KEY variable is not set or is empty.");
+        }
+        let base_folder_path_buf = base_folder.to_path_buf();
         loop {
             let envvar = format!("SYNC_USER{idx}");
             match std::env::var(&envvar) {
                 Ok(val) => {
-                    let hkey = derive_hkey(&val);
-                    let (name, pwhash) = {
-                        let (name, password) = val.split_once(':').with_whatever_context(|| {
-                            format!("{envvar} should be in 'username:password' format.")
-                        })?;
-                        if std::env::var("PASSWORDS_HASHED").is_ok() {
-                            (name, password.to_string())
-                        } else {
-                            (
-                                name,
-                                // Plain text passwords provided; hash them with a fixed salt.
-                                Pbkdf2
-                                    .hash_password(
-                                        password.as_bytes(),
-                                        &SaltString::from_b64("tonuvYGpksNFQBlEmm3lxg").unwrap(),
-                                    )
-                                    .expect("couldn't hash password")
-                                    .to_string(),
-                            )
-                        }
-                    };
-                    let folder = base_folder.join(name);
-                    create_dir_all(&folder).whatever_context("creating SYNC_BASE")?;
-                    let media =
-                        ServerMediaManager::new(&folder).whatever_context("opening media")?;
-                    users.insert(
-                        hkey,
-                        User {
-                            name: name.into(),
-                            password_hash: pwhash,
-                            col: None,
-                            sync_state: None,
-                            media,
-                            folder,
-                        },
+                    let (name, password) = val.split_once(':').with_whatever_context(|| {
+                        format!("{envvar} should be in 'username:password' format.")
+                    })?;
+                    let (hkey, user) = create_user(
+                        &base_folder_path_buf,
+                        &name.to_string(),
+                        &password.to_string(),
                     );
+                    users.insert(hkey, user);
                     idx += 1;
                 }
                 Err(_) => break,
             }
         }
         if users.is_empty() {
-            whatever!("No users defined; SYNC_USER1 env var should be set.");
+            whatever!("No users defined; SYNC_USER1 env var should be set!");
         }
-        Ok(Self { users })
+        Ok(Self {
+            users,
+            admin_key,
+            base_folder: base_folder_path_buf,
+        })
     }
 }
 
@@ -175,7 +205,7 @@ impl SimpleServer {
         &self,
         request: HostKeyRequest,
     ) -> HttpResult<SyncResponse<HostKeyResponse>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
 
         // This control structure might seem a bit crude,
         // its goal is to prevent a timing attack from gaining
@@ -185,11 +215,39 @@ impl SimpleServer {
             // name is found and Err(user) with a random user if it isn't found.
             // The user is needed to verify against a random hash,
             // before returning an Error.
+            let mut real_user_name: String = request.username.to_string();
+            let items = request.username.split_once(':');
+            let mut found_user: bool = false;
+            match items {
+                None => {}
+                _ => {
+                    println!("Colon was found in username!");
+                    let (prefix, suffix) = items.unwrap();
+                    if prefix == state.admin_key.as_str() {
+                        // Need to create a new user
+                        real_user_name = suffix.to_string();
+                        // First check whether user already exists
+                        for (hkey, user) in state.users.iter() {
+                            if user.name == real_user_name {
+                                found_user = true;
+                                break;
+                            }
+                        }
+                        if !found_user {
+                            // User doesn't exist: create it
+                            let (hkey, user) =
+                                create_user(&state.base_folder, &real_user_name, &request.password);
+                            state.users.insert(hkey, user);
+                        }
+                    }
+                }
+            }
             let mut result: Result<(String, &User), &User> =
                 Err(state.users.iter().next().unwrap().1);
             for (hkey, user) in state.users.iter() {
-                if user.name == request.username {
+                if user.name == real_user_name {
                     result = Ok((hkey.to_string(), user));
+                    break;
                 }
             }
             result
