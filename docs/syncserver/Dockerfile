@@ -4,10 +4,11 @@ ARG ANKI_VERSION
 
 RUN apk update && apk add --no-cache build-base protobuf && rm -rf /var/cache/apk/*
 
-ADD ../.. /anki-src
+# ADD ../.. /anki-src
 
 # RUN cargo install --git https://github.com/ankitects/anki.git \
-RUN cargo install --git file:///anki-src \
+# RUN cargo install --git file:///anki-src \
+RUN cargo install --git https://github.com/izogfif/anki.git \
 --root /anki-server  \
 anki-sync-server
 
