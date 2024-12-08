@@ -92,27 +92,24 @@ fn default_base() -> PathBuf {
 pub fn default_ip_header() -> SecureClientIpSource {
     SecureClientIpSource::ConnectInfo
 }
-
+fn get_password_hash(password: &String) -> String {
+    if std::env::var("PASSWORDS_HASHED").is_ok() {
+        password.to_string()
+    } else {
+        // Plain text passwords provided; hash them with a fixed salt.
+        Pbkdf2
+            .hash_password(
+                password.as_bytes(),
+                &SaltString::from_b64("tonuvYGpksNFQBlEmm3lxg").unwrap(),
+            )
+            .expect("couldn't hash password")
+            .to_string()
+    }
+}
 fn create_user(base_folder: &PathBuf, name: &String, password: &String) -> (String, User) {
     let val: String = [name.to_string(), password.to_string()].join(":");
     let hkey = derive_hkey(&val);
-    let (name, pwhash) = {
-        if std::env::var("PASSWORDS_HASHED").is_ok() {
-            (name.to_string(), password.to_string())
-        } else {
-            (
-                name.to_string(),
-                // Plain text passwords provided; hash them with a fixed salt.
-                Pbkdf2
-                    .hash_password(
-                        password.as_bytes(),
-                        &SaltString::from_b64("tonuvYGpksNFQBlEmm3lxg").unwrap(),
-                    )
-                    .expect("couldn't hash password")
-                    .to_string(),
-            )
-        }
-    };
+    let pwhash = get_password_hash(password);
     let folder = base_folder.join(&name);
     create_dir_all(&folder)
         // .whatever_context("creating SYNC_BASE")
@@ -227,9 +224,11 @@ impl SimpleServer {
                         // Need to create a new user
                         real_user_name = suffix.to_string();
                         // First check whether user already exists
-                        for (hkey, user) in state.users.iter() {
+                        for (hkey, user) in state.users.iter_mut() {
                             if user.name == real_user_name {
                                 found_user = true;
+                                state.users.remove(hkey);
+                                user.password_hash = get_password_hash(&request.password);
                                 break;
                             }
                         }
