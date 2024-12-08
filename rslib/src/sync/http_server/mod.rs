@@ -214,7 +214,7 @@ impl SimpleServer {
             // before returning an Error.
             let mut real_user_name: String = request.username.to_string();
             let items = request.username.split_once(':');
-            let mut found_user: bool = false;
+            let mut hkey_of_requested_user: String = String::new();
             match items {
                 None => {}
                 _ => {
@@ -226,17 +226,22 @@ impl SimpleServer {
                         // First check whether user already exists
                         for (hkey, user) in state.users.iter_mut() {
                             if user.name == real_user_name {
-                                found_user = true;
-                                state.users.remove(hkey);
-                                user.password_hash = get_password_hash(&request.password);
+                                hkey_of_requested_user = hkey.to_string();
                                 break;
                             }
                         }
-                        if !found_user {
+                        if hkey_of_requested_user.is_empty() {
                             // User doesn't exist: create it
                             let (hkey, user) =
                                 create_user(&state.base_folder, &real_user_name, &request.password);
                             state.users.insert(hkey, user);
+                        } else {
+                            // User exists: update their password
+                            state
+                                .users
+                                .get_mut(&hkey_of_requested_user)
+                                .unwrap()
+                                .password_hash = get_password_hash(&request.password);
                         }
                     }
                 }
